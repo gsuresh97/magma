@@ -33,6 +33,7 @@
 #include <3gpp_29.274.h>
 #include <inttypes.h>
 #include <netinet/in.h>
+#include <zookeeper/zookeeper.h>
 
 #include "bstrlib.h"
 #include "dynamic_memory_check.h"
@@ -76,6 +77,7 @@
 #include "service303.h"
 #include "sgs_messages_types.h"
 #include "secu_defs.h"
+// #include "zookeeper_utils.h"
 
 #if EMBEDDED_SGW
 #define TASK_SPGW TASK_SPGW_APP
@@ -556,6 +558,111 @@ void mme_app_handle_conn_est_cnf(nas_establish_rsp_t* const nas_conn_est_cnf_p)
 
 // sent by S1AP
 //------------------------------------------------------------------------------
+void watcher1 (zhandle_t *zh, 
+               int type, 
+               int state, 
+               const char *path, 
+               void *watcherCtx) {}
+
+int ue_ctx_serialize(const ue_mm_context_t *ctx, char *buf) {
+  buf = malloc(sizeof(*ctx));
+  memcpy(buf, ctx, sizeof(*ctx));
+  return sizeof(*ctx);
+}
+
+void print_binary(const char* str, int str_len) {
+  char* a = malloc(str_len * 9 + 1);
+  if (str == NULL) {
+    OAILOG_INFO(LOG_MME_APP, "String is null");
+    return;
+  }
+  for(int i = 0; i < str_len; i++) {
+    char tmp = str[i];
+    for(int j = 0; j < 8; j++) {
+      char mask = tmp & (128 >> j);
+      if (((mask >> (7-j)) & 1) == 0) {
+          a[i*9 + j] = 48;
+      } else {
+          a[i*9 + j] = 49;
+      }
+    }
+    a[i*9 + 8] = 32;
+  }
+  a[str_len*9] = 0;
+  OAILOG_INFO(LOG_MME_APP, "Binary: %s", a);
+  free(a);
+}
+
+void print_uint64_hash_table(hash_table_uint64_ts_t* htbl) {
+  hashtable_key_array_t* keys = hashtable_uint64_ts_get_keys(htbl);
+  OAILOG_INFO(LOG_MME_APP, "Hashtable Dump");
+  for (int i = 0; i < keys->num_keys; i++) {
+    uint64_t val;
+    hashtable_uint64_ts_get(htbl, keys->keys[i], &val);
+    OAILOG_INFO(LOG_MME_APP, "Key: %lu\tValue: %lu", keys->keys[i], val);
+  }
+}
+
+int ht_keys_serialize(hashtable_key_array_t *keys, char **buf) {
+  int len = keys->num_keys;
+  *buf = calloc(sizeof(len) + len*sizeof(uint64_t), sizeof(char));
+  int test = 0;
+  memcpy(*buf, &len, sizeof(len));
+  memcpy(&test, *buf, sizeof(test));
+  OAILOG_INFO(LOG_MME_APP, "Test num keys value: %d.", test);
+  OAILOG_INFO(LOG_MME_APP, "Binary Print Serialization test:");
+  memcpy(*buf + sizeof(len), keys->keys, len*sizeof(uint64_t));
+  print_binary(*buf, sizeof(len) + len*sizeof(uint64_t));
+  OAILOG_INFO(LOG_MME_APP, "Copied keys to buffer, about to return Serialized Keys");
+  if (*buf == NULL) {
+    OAILOG_INFO(LOG_MME_APP, "Buffer is NULL inside, ERROR");
+  }
+  return sizeof(len) + len*sizeof(uint64_t);
+}
+
+void update_htbl(int rc, const char *value, int value_len, 
+                 const struct Stat *stat, const void *data)
+{
+  mme_app_desc_t* mme_desc = (mme_app_desc_t*)(data);
+  if (rc != 0) {
+    OAILOG_ERROR(LOG_MME_APP, 
+                 "Fetching from Zookeeper failed. Error code: %d", rc);
+    return;
+  } else {
+    OAILOG_INFO(LOG_MME_APP, "Fetching hastable from Zookeeper success");
+  }
+  OAILOG_INFO(LOG_MME_APP, "Printing fetched binary");
+  print_binary(value, value_len);
+  int num_keys = 0;
+  memcpy(&num_keys, value, sizeof(num_keys));
+  OAILOG_INFO(LOG_MME_APP, "Number of keys: %d", num_keys);
+
+  for(int i = 0; i < num_keys; i++) {
+    uint64_t ht_key = 0;
+    uint64_t ht_value = 0;
+    memcpy(
+      &ht_key, 
+      value + sizeof(num_keys) + i * sizeof(ht_key), 
+      sizeof(ht_key));
+    OAILOG_INFO(LOG_MME_APP, "hashtable key: %d", (int)(ht_key));
+    memcpy(
+      &ht_value, 
+      value + sizeof(num_keys) + num_keys * sizeof(ht_key) + 
+        i * sizeof(ht_value), 
+      sizeof(ht_value));
+    OAILOG_INFO(LOG_MME_APP, "hashtable value: %d", (int)(ht_value));
+    hashtable_uint64_ts_insert(
+      mme_desc->mme_ue_contexts.enb_ue_s1ap_id_ue_context_htbl,
+      ht_key,
+      ht_value
+    );
+  }
+  OAILOG_INFO(LOG_MME_APP, "Updated hash table from zookeeper data");
+  
+  print_uint64_hash_table(
+    mme_desc->mme_ue_contexts.enb_ue_s1ap_id_ue_context_htbl);
+}
+
 void mme_app_handle_initial_ue_message(mme_app_desc_t *mme_app_desc_p,
   itti_s1ap_initial_ue_message_t *const initial_pP)
 {
@@ -565,6 +672,25 @@ void mme_app_handle_initial_ue_message(mme_app_desc_t *mme_app_desc_p,
   bool is_mm_ctx_new = false;
   emm_context_t *ue_nas_ctx = NULL;
   enb_s1ap_id_key_t enb_s1ap_id_key = INVALID_ENB_UE_S1AP_ID_KEY;
+  
+  struct Stat* stat = NULL;
+  zhandle_t* handle = NULL;
+  int rcode;
+  char buf[512];
+
+  handle = zookeeper_init("127.0.0.1:2181", &watcher1, 2000, 0, NULL, 0);
+  if (handle == NULL) {
+    OAILOG_ERROR(LOG_MME_APP, "Could not connect to zookeeper");
+  }
+
+  if ((rcode = zoo_exists(handle, "/attach/enb_ue_s1ap_id_ue_context_htbl",
+                          0, stat)) == ZOK) {
+    
+    // read vals from attach
+    OAILOG_INFO(LOG_S1AP, "About to fetch hashtable from zookeeper.");
+    zoo_aget(handle, "/attach_diff/enb_ue_s1ap_id_ue_context_htbl", 0, 
+             &update_htbl, mme_app_desc_p);
+  }
 
   OAILOG_INFO(LOG_MME_APP, "Received MME_APP_INITIAL_UE_MESSAGE from S1AP\n");
 
@@ -727,6 +853,83 @@ void mme_app_handle_initial_ue_message(mme_app_desc_t *mme_app_desc_p,
     ue_context_p->enb_ue_s1ap_id);
   OAILOG_DEBUG(
     LOG_MME_APP, "Is S-TMSI Valid - (%d)\n",initial_pP->is_s_tmsi_valid);
+
+  OAILOG_INFO(LOG_MME_APP, "Creating new attach_diff or deleting existing.");
+  rcode = zoo_exists(handle, "/attach_diff", 0, stat);
+  OAILOG_INFO(
+    LOG_MME_APP, 
+    "Creating new attach_diff or deleting existing. rcode is %d", 
+    rcode);
+  if (rcode == ZNONODE) {
+    int err = zoo_create(handle, "/attach_diff", "", 0, &ZOO_OPEN_ACL_UNSAFE, 
+                         ZOO_PERSISTENT, buf, sizeof(buf) - 1);
+    if (err != ZOK) {
+      OAILOG_ERROR(LOG_MME_APP, "attach_diff not created. Code: %d", err);
+    }
+    OAILOG_INFO(LOG_MME_APP, "Created new attach_diff.");
+  } else if (rcode == ZOK) {
+    int htbl_exists = zoo_exists(handle, 
+                                 "/attach_diff/enb_ue_s1ap_id_ue_context_htbl",
+                                 0, 
+                                 stat);
+    if (htbl_exists == ZOK) {
+      OAILOG_INFO(LOG_MME_APP, "Hashtable also exists, deleting hashtable");
+      int err = zoo_delete(
+        handle, 
+        "/attach_diff/enb_ue_s1ap_id_ue_context_htbl", 
+        -1);
+      if (err != ZOK) {
+        OAILOG_ERROR(LOG_MME_APP, "Hashtable not deleted. Code: %d", err);
+      }
+    }
+    int err = zoo_delete(handle, "/attach_diff", -1);
+    if (err != ZOK) {
+      OAILOG_ERROR(LOG_MME_APP, "attach_diff not deleted. Code: %d", err);
+    }
+    OAILOG_INFO(LOG_MME_APP, "Deleted existing attach_diff.");
+    err = zoo_create(handle, "/attach_diff", "", 0, &ZOO_OPEN_ACL_UNSAFE, 
+                         ZOO_PERSISTENT, buf, sizeof(buf) - 1);
+    if (err != ZOK) {
+      OAILOG_ERROR(LOG_MME_APP, "attach_diff not created. Code: %d", err);
+    }
+    OAILOG_INFO(LOG_MME_APP, "Created new attach_diff.");
+  }
+
+  hashtable_key_array_t* keys = hashtable_uint64_ts_get_keys(
+    mme_app_desc_p->mme_ue_contexts.enb_ue_s1ap_id_ue_context_htbl);
+  char* str = NULL;
+  int keys_len = ht_keys_serialize(keys, &str);
+  if (str == NULL) {
+    OAILOG_INFO(LOG_MME_APP, "Buffer is NULL OUTSIDE, ERROR");
+  }
+  OAILOG_INFO(LOG_MME_APP, "Serialized Keys returned");
+  int num_elems = keys->num_keys;
+  int str_len = keys_len + num_elems*sizeof(uint64_t);
+  str = realloc(str, keys_len + num_elems*sizeof(uint64_t));
+  for (int i = 0; i < num_elems; i++) {
+    uint64_t val;
+    hashtable_uint64_ts_get(
+      mme_app_desc_p->mme_ue_contexts.enb_ue_s1ap_id_ue_context_htbl,
+      keys->keys[i], 
+      &val);
+    OAILOG_INFO(LOG_MME_APP, "Value of the key: %lu", val);
+    memcpy(str + keys_len + i*sizeof(uint64_t), &val, sizeof(val));
+  }
+  OAILOG_INFO(LOG_MME_APP, "Printing original binary");
+  print_binary(str, str_len);
+  int err = zoo_create(handle, "/attach_diff/enb_ue_s1ap_id_ue_context_htbl", 
+                       str,  str_len, &ZOO_OPEN_ACL_UNSAFE, ZOO_PERSISTENT, 
+                       buf, sizeof(buf) - 1);
+  if (err != ZOK) {
+    OAILOG_INFO(LOG_MME_APP, 
+                "enb_ue_s1ap_id_ue_context_htbl not created. Code: %d", err);
+  }
+  OAILOG_INFO(LOG_MME_APP, 
+              "Loaded enb_ue_s1ap_id_ue_context_htbl to zookeeper");
+  OAILOG_INFO(LOG_MME_APP, "Length of message: %d.", str_len);
+
+  print_uint64_hash_table(
+    mme_app_desc_p->mme_ue_contexts.enb_ue_s1ap_id_ue_context_htbl);
 
   OAILOG_INFO(LOG_MME_APP, "Sending NAS Establishment Indication to NAS for ue_id = (%d)\n",
     ue_context_p->mme_ue_s1ap_id );

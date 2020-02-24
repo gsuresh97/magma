@@ -54,9 +54,11 @@
 *****************************************************************************/
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
+#include <zookeeper/zookeeper.h>
 
 #include "bstrlib.h"
 #include "dynamic_memory_check.h"
@@ -171,6 +173,12 @@ static int _emm_attach_accept_retx(emm_context_t *emm_context);
 /****************************************************************************/
 /******************  E X P O R T E D    F U N C T I O N S  ******************/
 /****************************************************************************/
+
+void watcher2 (zhandle_t *zh, 
+               int type, 
+               int state, 
+               const char *path, 
+               void *watcherCtx) {}
 
 /*
    --------------------------------------------------------------------------
@@ -1096,6 +1104,63 @@ static int _emm_attach_abort(
  * --------------------------------------------------------------------------
  */
 
+// void complete_amulti(int rc, const void *data) {}
+
+void pb(const char* str, int str_len) {
+  char* a = malloc(str_len * 9 + 1);
+  if (str == NULL) {
+    OAILOG_INFO(LOG_MME_APP, "String is null");
+    return;
+  }
+  for(int i = 0; i < str_len; i++) {
+    char tmp = str[i];
+    for(int j = 0; j < 8; j++) {
+      char mask = tmp & (128 >> j);
+      if (((mask >> (7-j)) & 1) == 0) {
+          a[i*9 + j] = 48;
+      } else {
+          a[i*9 + j] = 49;
+      }
+    }
+    a[i*9 + 8] = 32;
+  }
+  a[str_len*9] = 0;
+  OAILOG_INFO(LOG_MME_APP, "Binary: %s", a);
+  free(a);
+}
+
+void complete_get(int rc, const char *value, int value_len, 
+                  const struct Stat *stat, const void *data)
+{
+  zhandle_t* handle = (zhandle_t*)(data);
+  char buf[512];
+  // zoo_op_result_t* results = NULL;
+  // zoo_op_t ops[3];
+  OAILOG_INFO(LOG_NAS_EMM, "Succesfully got attach_diff data. Length: %d.",
+              value_len);
+  pb(value, value_len);
+
+  // zoo_delete_op_init(ops, "/attach", -1);
+  // zoo_create_op_init(&(ops[1]), "/attach", "", 0, &ZOO_OPEN_ACL_UNSAFE,
+  //                   ZOO_PERSISTENT, buf, sizeof(buf) - 1);
+  // zoo_create_op_init(&(ops[2]), "/attach/enb_ue_s1ap_id_ue_context_htbl",
+  //                   value, value_len, &ZOO_OPEN_ACL_UNSAFE, ZOO_PERSISTENT, 
+  //                   buf, sizeof(buf) - 1);
+  // zoo_amulti(handle, 3, ops, results, &complete_amulti, 0);
+  OAILOG_INFO(LOG_NAS_EMM, "Created operations. About to execute them atomically.");
+
+  zoo_delete(handle, "/attach", -1);
+  zoo_create(handle, "/attach", "", 0, &ZOO_OPEN_ACL_UNSAFE, ZOO_PERSISTENT,
+             buf, sizeof(buf) - 1);
+  zoo_create(handle, "/attach/enb_ue_s1ap_id_ue_context_htbl", value, 
+             value_len, &ZOO_OPEN_ACL_UNSAFE, ZOO_PERSISTENT, buf, 
+             sizeof(buf) - 1);
+
+  
+
+  OAILOG_INFO(LOG_NAS_EMM, "Atomically commited data to Zookeeper.");
+}
+
 //------------------------------------------------------------------------------
 static int _emm_attach_run_procedure(emm_context_t *emm_context)
 {
@@ -1158,6 +1223,20 @@ static int _emm_attach_run_procedure(emm_context_t *emm_context)
       // emergency allowed if go here, but have to be implemented...
       AssertFatal(0, "TODO emergency");
     }
+    zhandle_t* handle = NULL;
+    // char buf[512];
+    
+    handle = zookeeper_init("127.0.0.1:2181", &watcher2, 2000, 0, NULL, 0);
+    if (handle == NULL) {
+      OAILOG_ERROR(LOG_NAS_EMM, "Could not connect to zookeeper");
+    }
+
+    OAILOG_INFO(LOG_NAS_EMM, "Created Handle, about to get attach_diff data");
+    // zoo_create(handle, "/attach2", "", 0, &ZOO_OPEN_ACL_UNSAFE,
+    //            ZOO_PERSISTENT, buf, sizeof(buf) - 1);
+    
+    zoo_aget(handle, "/attach_diff/enb_ue_s1ap_id_ue_context_htbl", 0, 
+             &complete_get, handle);
   }
   OAILOG_FUNC_RETURN(LOG_NAS_EMM, rc);
 }

@@ -245,3 +245,7 @@ target_include_directories(TASK_NAS PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/api/mme
     ${CMAKE_CURRENT_SOURCE_DIR}/api/network
 )
+
+# link Zookeeper
+link_directories(/opt/apache-zookeeper-3.5.6/zookeeper-client/zookeeper-client-c/.libs/)
+target_link_libraries(TASK_NAS zookeeper_mt)

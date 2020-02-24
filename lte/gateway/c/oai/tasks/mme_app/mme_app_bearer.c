@@ -606,11 +606,8 @@ void print_uint64_hash_table(hash_table_uint64_ts_t* htbl) {
 int ht_keys_serialize(hashtable_key_array_t *keys, char **buf) {
   int len = keys->num_keys;
   *buf = calloc(sizeof(len) + len*sizeof(uint64_t), sizeof(char));
-  int test = 0;
+  OAILOG_INFO(LOG_MME_APP, "Serializing Keys");
   memcpy(*buf, &len, sizeof(len));
-  memcpy(&test, *buf, sizeof(test));
-  OAILOG_INFO(LOG_MME_APP, "Test num keys value: %d.", test);
-  OAILOG_INFO(LOG_MME_APP, "Binary Print Serialization test:");
   memcpy(*buf + sizeof(len), keys->keys, len*sizeof(uint64_t));
   print_binary(*buf, sizeof(len) + len*sizeof(uint64_t));
   OAILOG_INFO(LOG_MME_APP, "Copied keys to buffer, about to return Serialized Keys");
@@ -618,6 +615,24 @@ int ht_keys_serialize(hashtable_key_array_t *keys, char **buf) {
     OAILOG_INFO(LOG_MME_APP, "Buffer is NULL inside, ERROR");
   }
   return sizeof(len) + len*sizeof(uint64_t);
+}
+
+int ht_values_serialize(hash_table_uint64_ts_t* htbl, 
+                        hashtable_key_array_t *keys, 
+                        char **str)
+{
+  int keys_len = sizeof(int) + keys->num_keys * sizeof(uint64_t);
+  int num_elems = keys->num_keys;
+  int str_len = keys_len + num_elems*sizeof(uint64_t);
+  OAILOG_INFO(LOG_MME_APP, "Serializing Values. String length: %d", str_len);
+  *str = realloc(*str, keys_len + num_elems*sizeof(uint64_t));
+  for (int i = 0; i < num_elems; i++) {
+    uint64_t val;
+    hashtable_uint64_ts_get(htbl, keys->keys[i], &val);
+    OAILOG_INFO(LOG_MME_APP, "Value of the key: %lu", val);
+    memcpy(*str + keys_len + i*sizeof(uint64_t), &val, sizeof(val));
+  }
+  return str_len;
 }
 
 void update_htbl(int rc, const char *value, int value_len, 
@@ -898,23 +913,12 @@ void mme_app_handle_initial_ue_message(mme_app_desc_t *mme_app_desc_p,
   hashtable_key_array_t* keys = hashtable_uint64_ts_get_keys(
     mme_app_desc_p->mme_ue_contexts.enb_ue_s1ap_id_ue_context_htbl);
   char* str = NULL;
-  int keys_len = ht_keys_serialize(keys, &str);
-  if (str == NULL) {
-    OAILOG_INFO(LOG_MME_APP, "Buffer is NULL OUTSIDE, ERROR");
-  }
-  OAILOG_INFO(LOG_MME_APP, "Serialized Keys returned");
-  int num_elems = keys->num_keys;
-  int str_len = keys_len + num_elems*sizeof(uint64_t);
-  str = realloc(str, keys_len + num_elems*sizeof(uint64_t));
-  for (int i = 0; i < num_elems; i++) {
-    uint64_t val;
-    hashtable_uint64_ts_get(
-      mme_app_desc_p->mme_ue_contexts.enb_ue_s1ap_id_ue_context_htbl,
-      keys->keys[i], 
-      &val);
-    OAILOG_INFO(LOG_MME_APP, "Value of the key: %lu", val);
-    memcpy(str + keys_len + i*sizeof(uint64_t), &val, sizeof(val));
-  }
+  ht_keys_serialize(keys, &str);
+  int str_len = ht_values_serialize(
+    mme_app_desc_p->mme_ue_contexts.enb_ue_s1ap_id_ue_context_htbl,
+    keys,
+    &str
+  );
   OAILOG_INFO(LOG_MME_APP, "Printing original binary");
   print_binary(str, str_len);
   int err = zoo_create(handle, "/attach_diff/enb_ue_s1ap_id_ue_context_htbl", 

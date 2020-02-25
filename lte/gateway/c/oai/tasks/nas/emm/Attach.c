@@ -1232,9 +1232,6 @@ static int _emm_attach_run_procedure(emm_context_t *emm_context)
     }
 
     OAILOG_INFO(LOG_NAS_EMM, "Created Handle, about to get attach_diff data");
-    // zoo_create(handle, "/attach2", "", 0, &ZOO_OPEN_ACL_UNSAFE,
-    //            ZOO_PERSISTENT, buf, sizeof(buf) - 1);
-    
     zoo_aget(handle, "/attach_diff/enb_ue_s1ap_id_ue_context_htbl", 0, 
              &complete_get, handle);
   }

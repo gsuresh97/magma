@@ -93,3 +93,14 @@ making the rest of the Attach procedure in Magma robust.
 7. Then, run `make restart` in `magma/lte/gateway` of the dev VM to restart the magma service and clear the state.
 8. Run step 6 again, to see "Fetching hastable from Zookeeper success" in the logs, followed by a dump of the hash table that was fetched prefixed again by "Hashtable Dump"
 
+# Attach Notes
+* The call graph located [here](https://github.com/gsuresh97/magma/blob/master/docs/readmes/lte/Attach_call_flow_in_Magma.png) provides a lot of detail. All the lines in green color are places where the context is added and the lines in red signify areas where the context is changed. Since the context is only synced with zookeeper before and after it's used, some of these can be ignored but they should all be checked nevertheless. 
+* Contexts used in multiple places during the attach procedure call include  `mme_ue_context_t` in `mme_app_ue_context.h` and `emm_context_s` in `emm_data.h`. 
+  * These contexts contain mostly hashtables and other pointers structs.
+  * To effectively store this in zookeeper, the pointers will need to be dereferenced and serialized seperately. There is a chance those may also consist of pointers so in order to serialize these contexts efficiently, a profile of these contexts could first be constructed and the serialization could be dome recrusively using the profile as a guideline.
+* A context is also stored in a few linked lists such as the one in `emm_context->emm_procedures->emm_common_procs` in the struct `emm_procedures_t` in `lte/gateway/c/oai/tasks/nas/nas_procedures.h` These will need to be serialized seperately, since the nodes are represented by pointers that cannot be serialized using `memcpy()`.
+* There are also some instances where it seems that magma creates and uses containers that store callback functions that are stored as function pointers across multiple calls to the Attach procedure. These will also need to be handled seperately. 
+  * One option may be to create a constant global hashtable that encodes known values to function pointers, and serialize the key corresponding to the function pointer when the context is stored in Zookeeper. 
+  * This, while making the implementation simpler could be messy to maintain. Another approach could be to refactor the code and design it such that function pointers need not be stored in Zookeeper.
+  * One example of function pointers being stored is in `lte/gateway/c/oai/tasks/nas/nas_procedures.c` in the function `nas_new_authentication_procedure`.
+  * This function stores a wrapper of type `nas_emm_common_procedure_t` to a list. If we drill down far enough, we see that `wrapper->proc.emm_proc.base_proc.success_notif` has the folowing typdef: `typedef int (*success_cb_t)(struct emm_context_s *);`
